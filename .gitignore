@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual env
+.venv/
+venv/
+ENV/
+env/
+
+# Data / outputs
+data/
+*.json
+*.csv
+*.sqlite
+*.db
+
+# Logs
+*.log
+log_download.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets
+.env
+*.pem
+*.key
+secrets.json
+
+# PyCharm
+*.iml
+
+# Byte-compiled / packaging
+build/
+dist/
+*.egg-info/
+
+# Git LFS placeholder (if used)
+# *.bin
