@@ -1,107 +1,120 @@
-#hàm fetch dữ liệu sản phẩm từ API 
-# fetcher.py
-# Gửi hàng nghìn request song song (concurrently) đến API Tiki để lấy dữ liệu sản phẩm, xử lý lỗi (retry khi cần)
+# fetcher.py (sửa lại)
 import asyncio
 import aiohttp
-from typing import List, Dict, Optional
+from typing import List, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from pathlib import Path
+from datetime import datetime
+import aiofiles
+
 from config import API_TEMPLATE, REQUEST_TIMEOUT, MAX_RETRIES, RETRY_BACKOFF, USER_AGENT, CONCURRENCY
 from utils.text_cleaner import clean_description
 
-# Exceptions to retry on: network/timeouts and 5xx statuses
 class FetchError(Exception):
     pass
 
-async def _extract_fields(raw_json: dict) -> dict:
-    """
-    Extract only necessary fields: id, name, url_key, price, cleaned description, images urls.
-    """
-    product = {}
-    product["id"] = raw_json.get("id")
-    product["name"] = raw_json.get("name")
-    product["url_key"] = raw_json.get("url_key")
-    product["price"] = raw_json.get("price")
-    # description cleaned
-    product["description"] = clean_description(raw_json.get("description"))
-    # images: collect list of image urls (large_url if present else base_url)
-    images = []
-    for img in raw_json.get("images") or []:
-        url = img.get("large_url") or img.get("base_url") or img.get("thumbnail_url")
-        if url:
-            images.append(url)
-    product["images"] = images
-    return product
-
 def _make_headers():
-# Tạo headers chuẩn cho mỗi request (User-Agent, Accept, …).
-# Giúp tránh bị chặn 403 từ API (do “bot detection”).
     return {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
     }
 
-def _raise_for_status(status: int):
-    if status >= 500:
-        raise FetchError(f"Server error {status}")
-    # for 404 or 4xx we won't retry — return None later
+async def log_error(product_id: str, error: str, batch_index: int, logs_dir: str = "logs"):
+    """
+    Ghi log lỗi bất đồng bộ. Tạo folder logs nếu chưa có.
+    """
+    log_dir = Path(logs_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "errors.log"
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiofiles.open(log_path, "a", encoding="utf-8") as f:
+        await f.write(f"[{ts}] Batch {batch_index} | ID={product_id} | Error={error}\n")
 
-# Sử dụng decorator @retry(...):
-    # Retry tối đa MAX_RETRIES lần.
-    # Dùng exponential backoff (tăng dần delay sau mỗi lần lỗi).
-    # Chỉ retry nếu lỗi là Timeout, ClientError hoặc FetchError.
+async def _extract_fields(raw_json: dict) -> dict:
+    product = {
+        "id": raw_json.get("id"),
+        "name": raw_json.get("name"),
+        "url_key": raw_json.get("url_key"),
+        "price": raw_json.get("price"),
+        "description": clean_description(raw_json.get("description")),
+        "images": [img.get("large_url") or img.get("base_url")
+                   for img in (raw_json.get("images") or []) if img],
+    }
+    return product
 
-
+# Retry only on network/timeouts/server errors (we will NOT raise for 404)
 @retry(stop=stop_after_attempt(MAX_RETRIES),
        wait=wait_exponential(multiplier=RETRY_BACKOFF, max=30),
        retry=retry_if_exception_type((asyncio.TimeoutError, aiohttp.ClientError, FetchError)))
 async def fetch_one(session: aiohttp.ClientSession, product_id: str) -> Optional[dict]:
     url = API_TEMPLATE.format(product_id=product_id)
-    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    headers = _make_headers()
-    async with session.get(url, headers=headers, timeout=timeout) as resp:
-        status = resp.status
-        if status == 200:
-            try:
-                data = await resp.json()
-            except Exception:
-                text = await resp.text()
-                raise FetchError(f"Invalid JSON for {product_id}: {text[:200]}")
-            return await _extract_fields(data)
-        elif status == 404:
-            # product not found — return minimal object or None
-            return None
-        else:
-            # 4xx other -> treat as non-retriable except 429 maybe; 5xx throw for retry
-            _raise_for_status(status)
-            return None
+    try:
+        async with session.get(url, headers=_make_headers(), timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+            if resp.status == 200:
+                try:
+                    data = await resp.json()
+                except Exception as e:
+                    raise FetchError(f"Invalid JSON: {e}")
+                return await _extract_fields(data)
+            elif resp.status == 404:
+                # product not found -> do NOT retry, just return None
+                return None
+            elif 400 <= resp.status < 500:
+                # other client errors -> do not retry
+                return None
+            else:
+                # server errors (5xx) -> raise to trigger retry
+                raise FetchError(f"Server {resp.status}")
+    except asyncio.TimeoutError as e:
+        # Let tenacity handle retry for timeouts
+        raise
+    except aiohttp.ClientError as e:
+        # network-level errors -> retry
+        raise
+    except Exception as e:
+        # wrap unexpected exceptions as FetchError so tenacity can retry if configured
+        raise FetchError(str(e))
 
-async def fetch_batch(product_ids: List[str], concurrency: int = CONCURRENCY) -> List[dict]:
+async def fetch_batch(product_ids: List[str], concurrency: int = CONCURRENCY, batch_index: int = 0) -> List[dict]:
     """
-    Fetch a list of product_ids concurrently and return list of extracted product dicts.
-    Skips None results (404 or missing).
+    Fetch product_ids concurrently. Returns list of successful product dicts.
+    Logs errors into logs/errors.log (async).
     """
-    connector = aiohttp.TCPConnector(limit_per_host=concurrency, limit=0, ssl=False)
-    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    semaphore = asyncio.Semaphore(concurrency)
-
     results: List[dict] = []
+    sem = asyncio.Semaphore(concurrency)
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    connector = aiohttp.TCPConnector(limit_per_host=concurrency, ssl=False)
 
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+
         async def bound_fetch(pid: str):
-            async with semaphore:
+            async with sem:
                 try:
                     res = await fetch_one(session, pid)
+                    if res is None:
+                        # treat None as not-found or client error; log it (optional)
+                        await log_error(pid, "Not found or client error", batch_index)
                     return res
                 except Exception as e:
-                    # log minimal info (print; main can use logging)
-                    print(f"[fetch error] id={pid} error={e}")
+                    # tenacity can raise RetryError wrapping the final exception,
+                    # but here we catch any exception and log it (so single failure won't crash)
+                    await log_error(pid, str(e), batch_index)
                     return None
 
         tasks = [asyncio.create_task(bound_fetch(pid)) for pid in product_ids]
-        for fut in asyncio.as_completed(tasks):
-            item = await fut
-            if item:
-                results.append(item)
 
+        # iterate completed tasks safely, but also protect await fut with try/except
+        for i, fut in enumerate(asyncio.as_completed(tasks), start=1):
+            try:
+                res = await fut  # this will not raise (we catch inside bound_fetch), but keep try anyway
+                if res:
+                    results.append(res)
+            except Exception as e:
+                # If anything bubbles up unexpectedly, log it and continue
+                await log_error("unknown", f"Unexpected task error: {e}", batch_index)
+            if i % 100 == 0:
+                print(f"  Progress: {i}/{len(tasks)} fetched...")
+
+    print(f"Batch done → {len(results)}/{len(product_ids)} success.")
     return results

@@ -1,35 +1,44 @@
-# Điểm khởi động chương trình 
-# main.py
-# main.py
 import asyncio
 import time
 import sys
+import json
 from tqdm.asyncio import tqdm
 from pathlib import Path
-
-from utils.io_utils import read_ids_from_file, chunk_list, save_batch_async
+import aiofiles
+from utils.io_utils import read_ids_from_file, chunk_list
 from fetcher import fetch_batch
 from config import IDS_FILE, OUTPUT_DIR, BATCH_SIZE, CONCURRENCY
 
-
 def get_completed_batches(output_dir: Path) -> set[int]:
     """
-    Kiểm tra thư mục output, xác định batch nào đã tồn tại file .json
-    Trả về set chứa index các batch đã hoàn thành
+    Chỉ đánh dấu batch đã hoàn thành nếu file json có dung lượng > 1KB.
     """
     completed = set()
     if not output_dir.exists():
         return completed
 
     for f in output_dir.glob("products_*.json"):
-        # file name dạng: products_0001.json
-        name = f.stem
+        if f.stat().st_size < 1024:  # file trống -> không coi là done
+            continue
         try:
-            idx = int(name.split("_")[1])
+            idx = int(f.stem.split("_")[1])
             completed.add(idx)
         except Exception:
             continue
     return completed
+
+async def save_batch(products, batch_index, output_dir):
+    if not products:
+        print(f"⚠️ Batch {batch_index} không có dữ liệu hợp lệ.")
+        return
+
+    out_file = output_dir / f"products_{batch_index:04d}.json"
+
+    # 🧠 Ghi file bất đồng bộ bằng aiofiles
+    async with aiofiles.open(out_file, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(products, ensure_ascii=False, indent=2))
+
+    print(f"✅ Saved {len(products)} products to {out_file.name}")
 
 
 async def process_all():
@@ -37,47 +46,39 @@ async def process_all():
     total = len(ids)
     batch_iter = list(chunk_list(ids, BATCH_SIZE))
     total_batches = len(batch_iter)
+
     print(f"Total ids: {total}")
     print(f"Total batches: {total_batches} (batch_size={BATCH_SIZE})")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     completed_batches = get_completed_batches(OUTPUT_DIR)
-    print(f"Found {len(completed_batches)} completed batches → will skip them.\n")
+    print(f"Found {len(completed_batches)} completed batches → skipping them.\n")
 
     start_time = time.time()
+    done_count = 0
 
-    # Progress bar cho toàn bộ tiến trình
     with tqdm(total=total, desc="Crawling", unit="ids") as pbar:
-        # Nếu có batch đã xong, cập nhật progress bar tương ứng
-        pbar.update(len(completed_batches) * BATCH_SIZE)
-
         for batch_index, batch_ids in enumerate(batch_iter, start=1):
             if batch_index in completed_batches:
-                continue  # bỏ qua batch đã có file
+                pbar.update(len(batch_ids))
+                continue
 
-            print(f"\n▶️ Processing batch {batch_index}/{total_batches} (ids: {len(batch_ids)})")
+            print(f"\n▶️ Processing batch {batch_index}/{total_batches} ...")
 
-            # fetch song song
-            products = await fetch_batch(batch_ids, concurrency=CONCURRENCY)
+            products = await fetch_batch(batch_ids, concurrency=CONCURRENCY, batch_index=batch_index)
 
-            # lưu dữ liệu async
-            await save_batch_async(products, batch_index, OUTPUT_DIR)
+            if products:
+                await save_batch(products, batch_index, OUTPUT_DIR)
+            else:
+                print(f"❌ Batch {batch_index} returned no data.")
 
-            # cập nhật progress bar
             pbar.update(len(batch_ids))
+            done_count += len(products)
 
-            elapsed = time.time() - start_time
-            avg_time = elapsed / (batch_index - len(completed_batches))
-            pbar.set_postfix({
-                "batch": f"{batch_index}/{total_batches}",
-                "avg_per_batch": f"{avg_time:.1f}s"
-            })
-
-            await asyncio.sleep(0.2)  # tránh gửi quá nhanh
+            await asyncio.sleep(0.5)
 
     total_time = time.time() - start_time
-    print(f"\n✅ Done. Processed {total} ids in {total_time/60:.2f} minutes.")
-
+    print(f"\n✅ Done. {done_count} products crawled in {total_time/60:.2f} minutes.")
 
 if __name__ == "__main__":
     try:
