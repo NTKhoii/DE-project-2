@@ -43,11 +43,3 @@ async def save_batch_async(data_batch: List[dict], batch_index: int, output_dir:
     # Use aiofiles to write bytes
     async with aiofiles.open(filename, "wb") as f:
         await f.write(content)
-
-# # synchronous convenience wrapper
-# def save_batch(data_batch: List[dict], batch_index: int, output_dir: str | Path):
-#     output_dir = Path(output_dir)
-#     output_dir.mkdir(parents=True, exist_ok=True)
-#     filename = output_dir / f"products_{batch_index:04}.json"
-#     with open(filename, "wb") as f:
-#         f.write(orjson.dumps(data_batch, option=orjson.OPT_NON_STR_KEYS))

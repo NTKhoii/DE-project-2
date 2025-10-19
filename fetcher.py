@@ -1,4 +1,3 @@
-# fetcher.py (sửa lại)
 import asyncio
 import aiohttp
 from typing import List, Optional

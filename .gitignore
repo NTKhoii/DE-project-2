@@ -19,8 +19,12 @@ data/
 *.db
 
 # Logs
+logs/
 *.log
 log_download.txt
+
+
+ids.txt
 
 # OS
 .DS_Store
