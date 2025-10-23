@@ -50,3 +50,5 @@ dist/
 
 # Git LFS placeholder (if used)
 # *.bin
+
+config.py
