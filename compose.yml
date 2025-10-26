@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: tiki_postgres
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: tiki_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data: 
+# Volume này sẽ được sử dụng để lưu trữ dữ liệu của PostgreSQL bên trong container. Nếu không có cũng được nhưng sẽ mất dữ liệu khi container bị xóa khi khởi động lại.
+# Tức là database chạy trong container tên tiki_postgres, port 5432 map ra host.
