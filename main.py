@@ -8,10 +8,14 @@ import aiofiles
 from utils.io_utils import read_ids_from_file, chunk_list
 from fetcher import fetch_batch
 from config import IDS_FILE, OUTPUT_DIR, BATCH_SIZE, CONCURRENCY
-
+from utils.send_mail import send_mail
+from dotenv import load_dotenv 
+import os
+load_dotenv() # Load environment variables from .env file nó trả về bool chứ không phải hàm để lấy biến môi trường để lấy biến môi trường dùng os.getenv("TEN_BIEN")
 def get_completed_batches(output_dir: Path) -> set[int]:
     """
-    Chỉ đánh dấu batch đã hoàn thành nếu file json có dung lượng > 1KB.
+    # Kiểm tra các batch đã hoàn thành dựa trên file đã lưu trong output_dir
+    # Nếu kích thước file < 1KB thì coi như chưa hoàn thành (file trống)
     """
     completed = set()
     if not output_dir.exists():
@@ -75,7 +79,7 @@ async def process_all():
             pbar.update(len(batch_ids))
             done_count += len(products)
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5) # Nghỉ một chút giữa các batch để tránh bị rate limit
 
     total_time = time.time() - start_time
     print(f"\n✅ Done. {done_count} products crawled in {total_time/60:.2f} minutes.")
@@ -83,5 +87,13 @@ async def process_all():
 if __name__ == "__main__":
     try:
         asyncio.run(process_all())
+        send_mail(
+            subject = "Crawling completed",
+            body = "The crawling process has finished successfully.",
+            to_email = os.getenv("email"))
     except KeyboardInterrupt:
         print("⛔ Interrupted by user", file=sys.stderr)
+        send_mail(
+            subject = "Crawling interrupted",
+            body = "The crawling process was interrupted by the user.",
+            to_email = os.getenv("email"))
